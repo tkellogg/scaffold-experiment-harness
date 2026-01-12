@@ -2,30 +2,39 @@
 
 Local experiment grid for testing scaffold-centric S5 viability hypotheses.
 
-## Requirements
-
-- Python 3.10+
-- Ollama running locally
-- 32GB RAM (for qwen3:4b natural precision)
-
-## Setup
+## Quick Start (Mac M2)
 
 ```bash
-# Install Ollama if needed
-# https://ollama.ai/
+# Install
+pip install mlx-lm flask httpx
 
-# Pull models (natural precision, no quantization)
-ollama pull qwen3:1.5b
-ollama pull qwen3:4b
+# Run server (in one terminal)
+python server.py --model Qwen/Qwen3-1.7B --port 8000
 
-# Install dependencies
-pip install httpx
+# Expose via ngrok (in another terminal)
+ngrok http 8000
+# → Copy the https://xxx.ngrok.io URL
 
-# Run grid
-python run_grid.py
+# Then give the URL to Strix to hit from the bot server
 ```
 
-## Grid Structure
+## Server
+
+`server.py` — Minimal MLX inference server with OpenAI-compatible endpoint.
+
+```bash
+# 1.7B model
+python server.py --model Qwen/Qwen3-1.7B --port 8000
+
+# 4B model
+python server.py --model Qwen/Qwen3-4B --port 8000
+```
+
+Uses MLX for native Apple Silicon inference. No quantization, natural precision.
+
+## Grid Runner
+
+`run_grid.py` — Boredom experiment grid (alternative to server approach).
 
 **9 scaffolds × 4 model conditions × 3 runs = 108 cells**
 
@@ -46,7 +55,7 @@ python run_grid.py
 - qwen3:4b with thinking
 - qwen3:4b without thinking
 
-## Usage
+## Usage (Grid)
 
 ```bash
 # Full grid (resumable)
