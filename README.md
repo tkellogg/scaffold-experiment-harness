@@ -5,11 +5,11 @@ Local experiment grid for testing scaffold-centric S5 viability hypotheses.
 ## Quick Start (Mac M2)
 
 ```bash
-# Install
-pip install mlx-lm flask httpx
+# Install (using uv)
+uv sync
 
 # Run server (in one terminal)
-python server.py --model Qwen/Qwen3-1.7B --port 8000
+uv run python server.py --port 8000
 
 # Expose via ngrok (in another terminal)
 ngrok http 8000
@@ -23,11 +23,11 @@ ngrok http 8000
 `server.py` — Minimal MLX inference server with OpenAI-compatible endpoint.
 
 ```bash
-# 1.7B model
-python server.py --model Qwen/Qwen3-1.7B --port 8000
+# Start server (loads model on first request)
+uv run python server.py --port 8000
 
-# 4B model
-python server.py --model Qwen/Qwen3-4B --port 8000
+# Or preload a model
+uv run python server.py --preload qwen3-1.7b --port 8000
 ```
 
 Uses MLX for native Apple Silicon inference. No quantization, natural precision.
@@ -59,19 +59,19 @@ Uses MLX for native Apple Silicon inference. No quantization, natural precision.
 
 ```bash
 # Full grid (resumable)
-python run_grid.py
+uv run python run_grid.py
 
 # Specific scaffolds
-python run_grid.py --scaffold 1 2 3
+uv run python run_grid.py --scaffold 1 2 3
 
 # Specific models
-python run_grid.py --model 1.5b_think 4b_think
+uv run python run_grid.py --model 1.5b_think 4b_think
 
 # Reset and start fresh
-python run_grid.py --reset
+uv run python run_grid.py --reset
 
 # Just show summary
-python run_grid.py --summary
+uv run python run_grid.py --summary
 ```
 
 ## Output
