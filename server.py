@@ -54,9 +54,18 @@ def load_model(model_key: str):
         print(f"Unloading {CURRENT_MODEL_ID}...")
         CURRENT_MODEL = None
         CURRENT_TOKENIZER = None
-        # Force garbage collection
+        # Force garbage collection and Metal sync
         import gc
         gc.collect()
+        # MLX Metal synchronization - wait for GPU command buffers to complete
+        try:
+            import mlx.core as mx
+            mx.synchronize()
+        except Exception:
+            pass
+        # Extra delay to ensure Metal command buffers fully flush
+        import time
+        time.sleep(0.5)
 
     print(f"Loading {hf_model_id} (native bf16, no quantization)...")
     CURRENT_MODEL, CURRENT_TOKENIZER = load(hf_model_id)
