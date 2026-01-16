@@ -117,6 +117,10 @@ def chat_completions():
         verbose=False
     )
 
+    # Post-generation Metal sync - flush GPU command buffers before returning
+    import mlx.core as mx
+    mx.synchronize()
+
     return jsonify({
         "id": "local-chat",
         "object": "chat.completion",

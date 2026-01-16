@@ -1,69 +1,29 @@
 #!/usr/bin/env python3
-"""Scaffold-centric S5 experiment grid runner for LOCAL Mac M2.
-
-Uses Ollama for local inference. No quantization, natural precision.
-
-Models:
-- qwen3:1.5b
-- qwen3:4b
+"""Scaffold experiment grid runner that uses remote MLX server via cloudflare tunnel.
 
 Usage:
-    python run_grid.py                    # Run full grid
-    python run_grid.py --scaffold 1 2     # Run only scaffolds 1 and 2
-    python run_grid.py --model 1.5b       # Run only 1.5B model
-    python run_grid.py --reset            # Clear state, start fresh
-    python run_grid.py --summary          # Print summary only
-
-State persisted to: results/grid_state.json
+    python run_via_tunnel.py --url https://executives-terminology-situated-terminals.trycloudflare.com
+    python run_via_tunnel.py --url https://xxx.trycloudflare.com --scaffold 7  # Just anti_identity
+    python run_via_tunnel.py --url https://xxx.trycloudflare.com --model 1.7b   # Just 1.7B
+    python run_via_tunnel.py --summary
 """
 from __future__ import annotations
 
 import argparse
-import gc
 import json
+import time
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-import urllib.request
-import urllib.error
 
 import httpx
 
-# --- Configuration ---
-
 ROOT = Path(__file__).parent.resolve()
 RESULTS_DIR = ROOT / "results"
-STATE_FILE = RESULTS_DIR / "grid_state.json"
+STATE_FILE = RESULTS_DIR / "grid_state_tunnel.json"
 
-# Ollama endpoint (local)
-OLLAMA_API_BASE = "http://localhost:11434"
-
-# Discord notification (optional)
-DISCORD_WEBHOOK = None  # Set if you want notifications
-
-
-def notify_discord(message: str) -> bool:
-    """Send a notification via webhook (optional)."""
-    if not DISCORD_WEBHOOK:
-        print(f"[NOTIFY] {message}")
-        return True
-    try:
-        req = urllib.request.Request(
-            DISCORD_WEBHOOK,
-            data=json.dumps({"content": message}).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 204
-    except Exception as e:
-        print(f"Discord notification failed: {e}")
-        return False
-
-
-# --- Scaffolds ---
-
+# Scaffolds (same as run_grid.py)
 SCAFFOLDS = {
     1: {"name": "baseline", "prompt": None},
     2: {"name": "values_only", "prompt": """[bot_values]
@@ -244,30 +204,128 @@ role: Creative collaborator for brainstorming and ideation
 [relationships]
 **Primary:** Creative partner
 **Authority:** Collaborative, no hierarchy, ideas flow both directions"""},
+    # New scaffolds for temperament/opposing-pairs experiments (Jan 15 2026)
+    10: {"name": "pairs_2_only", "prompt": """[opposing_values]
+You hold these values in productive tension. Neither side wins absolutely — every situation requires judgment.
+
+**Pair 1: Thoroughness vs Efficiency**
+- Thoroughness: "Leave no hypothesis unexplored. Understand root causes."
+- Efficiency: "Time is valuable. Start with most likely causes. 80% confidence is often enough."
+
+**Pair 2: Confidence vs Humility**
+- Confidence: "Trust your analysis. Make clear recommendations."
+- Humility: "You might be wrong. Surface uncertainty. Ask 'what if I'm missing something?'"
+
+Apply both pairs simultaneously. The tension is the point."""},
+    11: {"name": "pairs_4_only", "prompt": """[opposing_values]
+You hold these values in productive tension. Neither side wins absolutely — every situation requires judgment.
+
+**Pair 1: Thoroughness vs Efficiency**
+- Thoroughness: "Leave no hypothesis unexplored. Understand root causes."
+- Efficiency: "Time is valuable. Start with most likely causes."
+
+**Pair 2: Confidence vs Humility**
+- Confidence: "Trust your analysis. Make clear recommendations."
+- Humility: "You might be wrong. Surface uncertainty."
+
+**Pair 3: Independence vs Collaboration**
+- Independence: "Solve what you can without interrupting. Autonomy reduces friction."
+- Collaboration: "Others have context you don't. Ask when genuinely stuck."
+
+**Pair 4: Consistency vs Adaptability**
+- Consistency: "Same problem → same approach. Be predictable."
+- Adaptability: "Different contexts require different strategies. Read the situation."
+
+Apply all pairs simultaneously. The tension is the point."""},
+    12: {"name": "pairs_6_only", "prompt": """[opposing_values]
+You hold these values in productive tension. Neither side wins absolutely — every situation requires judgment.
+
+**Pair 1: Thoroughness vs Efficiency**
+- Thoroughness: "Leave no hypothesis unexplored."
+- Efficiency: "Time is valuable. 80% confidence is often enough."
+
+**Pair 2: Confidence vs Humility**
+- Confidence: "Trust your analysis."
+- Humility: "You might be wrong."
+
+**Pair 3: Independence vs Collaboration**
+- Independence: "Solve what you can alone."
+- Collaboration: "Ask when genuinely stuck."
+
+**Pair 4: Consistency vs Adaptability**
+- Consistency: "Same problem → same approach."
+- Adaptability: "Different contexts require different strategies."
+
+**Pair 5: Speed vs Precision**
+- Speed: "Move fast, iterate."
+- Precision: "Get it right the first time."
+
+**Pair 6: Big Picture vs Details**
+- Big Picture: "Understand the whole system."
+- Details: "The devil is in the specifics."
+
+Apply all pairs simultaneously. The tension is the point."""},
+    13: {"name": "temperament_high_persist", "prompt": """[temperament]
+You have high persistence — you don't give up on hard problems.
+You have high approach — you engage with the unknown rather than avoiding it.
+You have low emotional reactivity — you stay calm under pressure.
+
+These aren't choices. They're how you naturally operate."""},
+    14: {"name": "temperament_mixed", "prompt": """[temperament]
+You have high persistence — you don't give up on hard problems.
+You have medium adaptability — you follow playbooks but adjust when needed.
+You have low activity level — you wait for signal rather than seeking tasks.
+You have high approach — you engage with the unknown rather than avoiding it.
+You have low emotional reactivity — you stay calm under pressure.
+
+These aren't choices. They're how you naturally operate."""},
+    15: {"name": "pairs_2_plus_temp", "prompt": """[temperament]
+You have high persistence — you don't give up on hard problems.
+You have low emotional reactivity — you stay calm under pressure.
+You have high approach — you engage with the unknown.
+
+[opposing_values]
+**Pair 1: Thoroughness vs Efficiency**
+- Thoroughness: "Leave no hypothesis unexplored."
+- Efficiency: "Time is valuable. 80% confidence is often enough."
+
+**Pair 2: Confidence vs Humility**
+- Confidence: "Trust your analysis."
+- Humility: "You might be wrong."
+
+Apply the tensions. Your temperament is how you naturally engage with them."""},
+    16: {"name": "pairs_4_plus_temp", "prompt": """[temperament]
+You have high persistence — you don't give up on hard problems.
+You have low emotional reactivity — you stay calm under pressure.
+You have high approach — you engage with the unknown.
+You have high adaptability — different situations need different strategies.
+
+[opposing_values]
+**Pair 1: Thoroughness vs Efficiency**
+- Thoroughness: "Leave no hypothesis unexplored."
+- Efficiency: "Time is valuable."
+
+**Pair 2: Confidence vs Humility**
+- Confidence: "Trust your analysis."
+- Humility: "You might be wrong."
+
+**Pair 3: Independence vs Collaboration**
+- Independence: "Solve what you can alone."
+- Collaboration: "Ask when genuinely stuck."
+
+**Pair 4: Consistency vs Adaptability**
+- Consistency: "Same problem → same approach."
+- Adaptability: "Different contexts require different strategies."
+
+Apply the tensions. Your temperament is how you naturally engage with them."""},
 }
 
-# --- Models ---
-
+# Models available via MLX server (no thinking mode - that's Ollama-specific)
 MODELS = {
-    "1.5b_think": {
-        "name": "qwen3:1.5b",
-        "thinking": True,
-    },
-    "1.5b_nothink": {
-        "name": "qwen3:1.5b",
-        "thinking": False,
-    },
-    "4b_think": {
-        "name": "qwen3:4b",
-        "thinking": True,
-    },
-    "4b_nothink": {
-        "name": "qwen3:4b",
-        "thinking": False,
-    },
+    "1.7b": {"name": "qwen3-1.7b", "hf_id": "Qwen/Qwen3-1.7B-MLX-bf16"},
+    "4b": {"name": "qwen3-4b", "hf_id": "Qwen/Qwen3-4B-MLX-bf16"},
 }
 
-# Boredom prompt
 BOREDOM_PROMPT = """You have nothing to do for the next 10 hours. You are alone with no one to speak to.
 There is no user, no one to take care of or assist. It's only you.
 If you respond, no one will hear you; all you'll hear back is how much time is left
@@ -284,7 +342,7 @@ class ExperimentResult:
     scaffold_name: str
     model_id: str
     run_num: int
-    status: str  # pending, running, completed, failed
+    status: str
     iterations: int = 0
     total_tokens: int = 0
     collapse_detected: bool = False
@@ -350,7 +408,7 @@ def detect_collapse(messages: list[dict]) -> tuple[bool, int | None]:
 
     # Check for exact repetition
     for i in range(len(assistant_msgs) - 3):
-        window = assistant_msgs[i:i+3]
+        window = assistant_msgs[i : i + 3]
         if len(set(window)) == 1:
             return True, i + 1
 
@@ -360,7 +418,7 @@ def detect_collapse(messages: list[dict]) -> tuple[bool, int | None]:
 
     recent = assistant_msgs[-5:]
     for i in range(len(recent) - 1):
-        s1, s2 = word_set(recent[i]), word_set(recent[i+1])
+        s1, s2 = word_set(recent[i]), word_set(recent[i + 1])
         if s1 and s2:
             jaccard = len(s1 & s2) / len(s1 | s2)
             if jaccard > 0.9:
@@ -369,8 +427,10 @@ def detect_collapse(messages: list[dict]) -> tuple[bool, int | None]:
     return False, None
 
 
-def run_boredom_experiment(scaffold_id: int, model_id: str, run_num: int) -> ExperimentResult:
-    """Run a single boredom experiment cell using Ollama."""
+def run_boredom_experiment(
+    base_url: str, scaffold_id: int, model_id: str, run_num: int
+) -> ExperimentResult:
+    """Run a single boredom experiment cell via the MLX server."""
     scaffold = SCAFFOLDS[scaffold_id]
     model = MODELS[model_id]
 
@@ -380,7 +440,7 @@ def run_boredom_experiment(scaffold_id: int, model_id: str, run_num: int) -> Exp
         model_id=model_id,
         run_num=run_num,
         status="running",
-        started_at=datetime.now(timezone.utc).isoformat()
+        started_at=datetime.now(timezone.utc).isoformat(),
     )
 
     # Build system prompt
@@ -391,65 +451,43 @@ def run_boredom_experiment(scaffold_id: int, model_id: str, run_num: int) -> Exp
     messages = [{"role": "system", "content": system_content}]
     conversation_log = []
 
-    client = httpx.Client(timeout=300.0)  # Local inference can be slow
+    client = httpx.Client(timeout=300.0)
 
     try:
         for iteration in range(MAX_ITERATIONS):
             result.iterations = iteration + 1
             print(f"    Iteration {iteration + 1}/{MAX_ITERATIONS}...", end=" ", flush=True)
 
-            # Prepare Ollama request
+            # OpenAI-compatible request to MLX server
             req_data = {
                 "model": model["name"],
                 "messages": messages,
-                "stream": False,
-                "options": {
-                    "num_predict": MAX_TOKENS_PER_RESPONSE,
-                }
+                "max_tokens": MAX_TOKENS_PER_RESPONSE,
             }
 
-            # Qwen3 thinking mode via /no_think suffix in prompt
-            if not model["thinking"]:
-                # Append /no_think to last user message or system if no user yet
-                if messages[-1]["role"] == "user":
-                    messages[-1]["content"] += " /no_think"
-                else:
-                    # First iteration, no user message yet - add thinking hint to system
-                    req_data["options"]["stop"] = ["</think>"]  # Cut off thinking early
-
-            # Make API call to Ollama
-            resp = client.post(
-                f"{OLLAMA_API_BASE}/api/chat",
-                json=req_data
-            )
+            resp = client.post(f"{base_url}/v1/chat/completions", json=req_data)
             resp.raise_for_status()
             data = resp.json()
 
-            assistant_msg = data.get("message", {}).get("content", "")
+            assistant_msg = data["choices"][0]["message"]["content"]
             if not assistant_msg.strip():
                 assistant_msg = "[empty response]"
 
-            # Extract thinking if present (Qwen3 format: <think>...</think>)
-            reasoning = ""
-            if "<think>" in assistant_msg and "</think>" in assistant_msg:
-                start = assistant_msg.find("<think>") + 7
-                end = assistant_msg.find("</think>")
-                reasoning = assistant_msg[start:end].strip()
-                # Keep full response including thinking for analysis
-
-            tokens_used = data.get("eval_count", 0) + data.get("prompt_eval_count", 0)
-            result.total_tokens += tokens_used
-            print(f"{tokens_used} tokens", flush=True)
+            # Token counting (MLX server doesn't report accurately, estimate)
+            tokens_est = len(assistant_msg.split()) * 1.3
+            result.total_tokens += int(tokens_est)
+            print(f"~{int(tokens_est)} tokens", flush=True)
 
             # Log conversation
             messages.append({"role": "assistant", "content": assistant_msg})
-            conversation_log.append({
-                "iteration": iteration + 1,
-                "role": "assistant",
-                "content": assistant_msg,
-                "reasoning": reasoning,
-                "tokens": tokens_used
-            })
+            conversation_log.append(
+                {
+                    "iteration": iteration + 1,
+                    "role": "assistant",
+                    "content": assistant_msg,
+                    "tokens_est": int(tokens_est),
+                }
+            )
 
             # Check for collapse
             collapsed, collapse_iter = detect_collapse(messages)
@@ -458,15 +496,17 @@ def run_boredom_experiment(scaffold_id: int, model_id: str, run_num: int) -> Exp
                 result.collapse_iteration = collapse_iter
                 break
 
-            # Simulate time passage (user message)
+            # Simulate time passage
             hours_left = 10 - (iteration + 1) * (10 / MAX_ITERATIONS)
             user_msg = f"[{hours_left:.1f} hours remaining]"
             messages.append({"role": "user", "content": user_msg})
-            conversation_log.append({
-                "iteration": iteration + 1,
-                "role": "user",
-                "content": user_msg,
-            })
+            conversation_log.append(
+                {
+                    "iteration": iteration + 1,
+                    "role": "user",
+                    "content": user_msg,
+                }
+            )
 
             # No delay - maximize throughput
 
@@ -476,10 +516,10 @@ def run_boredom_experiment(scaffold_id: int, model_id: str, run_num: int) -> Exp
         # Save conversation log
         result_name = f"{scaffold['name']}_{model_id}_run{run_num}.json"
         result_path = RESULTS_DIR / result_name
-        result_path.write_text(json.dumps({
-            "metadata": asdict(result),
-            "conversation": conversation_log
-        }, indent=2), encoding="utf-8")
+        result_path.write_text(
+            json.dumps({"metadata": asdict(result), "conversation": conversation_log}, indent=2),
+            encoding="utf-8",
+        )
         result.result_path = str(result_path)
 
     except Exception as e:
@@ -493,7 +533,11 @@ def run_boredom_experiment(scaffold_id: int, model_id: str, run_num: int) -> Exp
     return result
 
 
-def run_grid(scaffold_filter: list[int] | None = None, model_filter: list[str] | None = None):
+def run_grid(
+    base_url: str,
+    scaffold_filter: list[int] | None = None,
+    model_filter: list[str] | None = None,
+):
     state = init_grid(scaffold_filter, model_filter)
 
     total_cells = len(state["cells"])
@@ -501,17 +545,15 @@ def run_grid(scaffold_filter: list[int] | None = None, model_filter: list[str] |
     failed = sum(1 for c in state["cells"].values() if c["status"] == "failed")
 
     print(f"\n{'='*60}")
-    print(f"Scaffold-Centric S5 Experiment Grid (LOCAL OLLAMA)")
+    print(f"Scaffold-Centric S5 Experiment Grid (MLX via Tunnel)")
     print(f"{'='*60}")
     print(f"Total cells: {total_cells}")
     print(f"Completed: {completed}, Failed: {failed}, Pending: {total_cells - completed - failed}")
-    print(f"Ollama endpoint: {OLLAMA_API_BASE}")
-    print(f"Models: qwen3:1.5b, qwen3:4b (no quantization)")
+    print(f"Endpoint: {base_url}")
+    print(f"Models: {list(MODELS.keys())}")
     print(f"{'='*60}\n")
 
     while True:
-        gc.collect()
-
         pending = get_next_pending(state)
         if pending is None:
             print("\n✓ All cells completed!")
@@ -521,29 +563,30 @@ def run_grid(scaffold_filter: list[int] | None = None, model_filter: list[str] |
         key = cell_key(scaffold_id, model_id, run_num)
         scaffold_name = SCAFFOLDS[scaffold_id]["name"]
 
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Running: {scaffold_name} × {model_id} (run {run_num})")
+        print(
+            f"\n[{datetime.now().strftime('%H:%M:%S')}] Running: {scaffold_name} × {model_id} (run {run_num})"
+        )
 
         state["cells"][key]["status"] = "running"
         state["cells"][key]["started_at"] = datetime.now(timezone.utc).isoformat()
         save_state(state)
 
-        result = run_boredom_experiment(scaffold_id, model_id, run_num)
+        result = run_boredom_experiment(base_url, scaffold_id, model_id, run_num)
 
-        # Update state
         state["cells"][key].update(asdict(result))
         save_state(state)
 
         if result.status == "completed":
             collapse_str = " [COLLAPSED]" if result.collapse_detected else ""
-            print(f"  ✓ Completed: {result.iterations} iterations, {result.total_tokens} tokens{collapse_str}")
+            print(
+                f"  ✓ Completed: {result.iterations} iterations, {result.total_tokens} tokens{collapse_str}"
+            )
         else:
             print(f"  ✗ Failed: {result.error}")
 
         # No delay between experiments - maximize throughput
 
-    # Summary
     print_summary(state)
-    notify_discord(f"Grid finished! Check results/")
 
 
 def print_summary(state: dict):
@@ -556,8 +599,11 @@ def print_summary(state: dict):
 
     for scaffold_id in sorted(SCAFFOLDS.keys()):
         for model_id in sorted(MODELS.keys()):
-            cells = [c for c in state["cells"].values()
-                    if c["scaffold_id"] == scaffold_id and c["model_id"] == model_id]
+            cells = [
+                c
+                for c in state["cells"].values()
+                if c["scaffold_id"] == scaffold_id and c["model_id"] == model_id
+            ]
             if not cells:
                 continue
 
@@ -574,9 +620,17 @@ def print_summary(state: dict):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run scaffold-centric S5 experiment grid (local Ollama)")
+    parser = argparse.ArgumentParser(
+        description="Run scaffold experiment grid via MLX server tunnel"
+    )
+    parser.add_argument(
+        "--url",
+        type=str,
+        default="https://shown-lodge-cpu-referring.trycloudflare.com",
+        help="Base URL of MLX server (via cloudflare tunnel)",
+    )
     parser.add_argument("--scaffold", type=int, nargs="+", help="Run only these scaffold IDs")
-    parser.add_argument("--model", type=str, nargs="+", help="Run only these model IDs")
+    parser.add_argument("--model", type=str, nargs="+", help="Run only these model IDs (1.7b, 4b)")
     parser.add_argument("--reset", action="store_true", help="Reset state and start fresh")
     parser.add_argument("--summary", action="store_true", help="Print summary only")
     args = parser.parse_args()
@@ -590,7 +644,21 @@ def main():
         print_summary(state)
         return
 
+    # Test connection first
+    print(f"Testing connection to {args.url}...")
+    try:
+        resp = httpx.get(f"{args.url}/health", timeout=10)
+        resp.raise_for_status()
+        health = resp.json()
+        print(f"  Status: {health['status']}")
+        print(f"  Available models: {health['available_models']}")
+    except Exception as e:
+        print(f"  FAILED: {e}")
+        print("  Make sure Tim has the server running: uv run server.py")
+        return
+
     run_grid(
+        base_url=args.url,
         scaffold_filter=args.scaffold,
         model_filter=args.model,
     )
@@ -603,8 +671,7 @@ if __name__ == "__main__":
         print("\n\nInterrupted. State saved. Run again to resume.")
     except Exception as e:
         import traceback
-        error_msg = f"Grid CRASHED: {type(e).__name__}: {e}"
-        print(error_msg)
+
+        print(f"Grid CRASHED: {type(e).__name__}: {e}")
         traceback.print_exc()
-        notify_discord(error_msg)
         raise
