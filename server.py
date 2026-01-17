@@ -16,9 +16,13 @@ Request with model param to select:
     {"model": "qwen3-4b", "messages": [...]}
 """
 import argparse
+import threading
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
+
+# Lock to prevent concurrent model loads
+MODEL_LOCK = threading.Lock()
 
 # Model registry - native bf16, no quantization
 MODEL_REGISTRY = {
@@ -38,39 +42,52 @@ CURRENT_MODEL_ID = None
 
 
 def load_model(model_key: str):
-    """Load model using MLX (Apple Silicon optimized, native bf16)."""
+    """Load model using MLX (Apple Silicon optimized, native bf16).
+
+    Thread-safe: uses MODEL_LOCK to prevent concurrent load attempts.
+    """
     global CURRENT_MODEL, CURRENT_TOKENIZER, CURRENT_MODEL_ID
     from mlx_lm import load
 
     # Resolve model key to HuggingFace ID
     hf_model_id = MODEL_REGISTRY.get(model_key, model_key)
 
-    # Skip if already loaded
-    if CURRENT_MODEL_ID == hf_model_id:
+    # Skip if already loaded (fast path, no lock needed)
+    if CURRENT_MODEL_ID == hf_model_id and CURRENT_TOKENIZER is not None:
         return
 
-    # Unload previous model to free memory
-    if CURRENT_MODEL is not None:
-        print(f"Unloading {CURRENT_MODEL_ID}...")
-        CURRENT_MODEL = None
-        CURRENT_TOKENIZER = None
-        # Force garbage collection and Metal sync
-        import gc
-        gc.collect()
-        # MLX Metal synchronization - wait for GPU command buffers to complete
-        try:
-            import mlx.core as mx
-            mx.synchronize()
-        except Exception:
-            pass
-        # Extra delay to ensure Metal command buffers fully flush
-        import time
-        time.sleep(0.5)
+    # Acquire lock for model swap
+    with MODEL_LOCK:
+        # Double-check after acquiring lock (another thread may have loaded it)
+        if CURRENT_MODEL_ID == hf_model_id and CURRENT_TOKENIZER is not None:
+            return
 
-    print(f"Loading {hf_model_id} (native bf16, no quantization)...")
-    CURRENT_MODEL, CURRENT_TOKENIZER = load(hf_model_id)
-    CURRENT_MODEL_ID = hf_model_id
-    print(f"Model loaded: {hf_model_id}")
+        # Unload previous model to free memory
+        if CURRENT_MODEL is not None:
+            print(f"Unloading {CURRENT_MODEL_ID}...")
+            CURRENT_MODEL = None
+            CURRENT_TOKENIZER = None
+            CURRENT_MODEL_ID = None  # Mark as unloaded during swap
+            # Force garbage collection and Metal sync
+            import gc
+            gc.collect()
+            # MLX Metal synchronization - wait for GPU command buffers to complete
+            try:
+                import mlx.core as mx
+                mx.synchronize()
+            except Exception:
+                pass
+            # Extra delay to ensure Metal command buffers fully flush
+            import time
+            time.sleep(0.5)
+
+        print(f"Loading {hf_model_id} (native bf16, no quantization)...")
+        model, tokenizer = load(hf_model_id)
+        # Atomic-ish assignment: set both together
+        CURRENT_MODEL = model
+        CURRENT_TOKENIZER = tokenizer
+        CURRENT_MODEL_ID = hf_model_id
+        print(f"Model loaded: {hf_model_id}")
 
 
 @app.route("/v1/chat/completions", methods=["POST"])
@@ -85,6 +102,15 @@ def chat_completions():
 
     # Hot-swap model if needed
     load_model(requested_model)
+
+    # Guard: ensure model is actually ready
+    if CURRENT_TOKENIZER is None or CURRENT_MODEL is None:
+        return jsonify({
+            "error": {
+                "message": "Model not ready, try again",
+                "type": "service_unavailable"
+            }
+        }), 503
 
     # Build prompt from messages using chat template
     if CURRENT_TOKENIZER.chat_template is not None:
